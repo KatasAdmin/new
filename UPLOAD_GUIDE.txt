@@ -1,0 +1,10 @@
+НОВАЯ ЖИЗНЬ — комплект v10
+
+Загрузить в GitHub KatasAdmin/new, сохраняя структуру.
+В корне: index.html и README.md.
+В папке server: main.py, requirements.txt, Procfile, railway.json.
+
+Railway Root Directory: /server
+Railway Variables: DATABASE_URL = reference на PostgreSQL.DATABASE_URL; TELEGRAM_BOT_TOKEN = токен BotFather (не публиковать).
+Не удалять Railway PostgreSQL и volume. Не менять DATABASE_URL.
+После загрузки проверить /api/health и открыть Telegram Mini App.
