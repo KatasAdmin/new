@@ -274,7 +274,7 @@ class Economy:
   if h is None:s.add(self.Holding(account_id=c.account_id,sector=key,shares=1))
   else:h.shares+=1
   self.locked(s).treasury+=price
-  self.add_log(s,c.account_id,-amount(price),'Покупка доли: '+info[1])
+  self.add_log(s,c.account_id,-amount(price),'Покупка бизнеса: '+info[1])
   self.save(c,d)
 
  def finance_payroll(self,s,c,d,key,zhn):
@@ -469,11 +469,13 @@ class Economy:
   sectors=[]
   for key,name,price,job,product in SECTORS:
    sec=s.get(self.Sector,key)
-   shares=sum(h.shares for h in s.query(self.Holding).filter_by(sector=key).all())
+   sector_holdings=s.query(self.Holding).filter_by(sector=key).all()
+   shares=sum(h.shares for h in sector_holdings)
+   owners_count=sum(1 for h in sector_holdings if h.shares>0)
    own=sum(h.shares for h in holders if h.sector==key)
    vacancies,staff=self.job_slots(s,key)
    pending=sec.wage_pool if sec else 0
-   sectors.append({'key':key,'name':name,'price':price,'job':job,'product':product,'owners':shares,'my_shares':own,
+   sectors.append({'key':key,'name':name,'price':price,'job':job,'product':product,'owners':shares,'owners_count':owners_count,'my_shares':own,
     'my_percent':round(100*own/shares,2) if shares else 0,'available_jobs':max(0,vacancies-staff),
     'workers':staff,'estimated_wage':round(min(TARGET_DAILY_WAGE,amount(pending)/max(1,staff+1)),2),
     'sales_total':amount(sec.total_revenue),'profit_total':amount(sec.total_profit),'wage_fund':amount(sec.wage_pool),
