@@ -98,7 +98,7 @@ async def lifespan(app):
  task=asyncio.create_task(tick_loop())
  try:yield
  finally:task.cancel()
-app=FastAPI(title='Новая Жизнь API',version='9.0-economy',lifespan=lifespan)
+app=FastAPI(title='Новая Жизнь API',version='9.3-economy',lifespan=lifespan)
 origins=[x.strip() for x in os.getenv('ALLOWED_ORIGINS','https://katasadmin.github.io,http://localhost:8000,http://127.0.0.1:5500').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=['GET','POST'],allow_headers=['Authorization','Content-Type'])
 
@@ -335,10 +335,10 @@ def state_payload(s,a,c,d):
 def health():
  try:
   with Session() as s:s.execute(select(Account.id).limit(1))
-  return {'ok':True,'database':'connected','version':'9.0-economy'}
+  return {'ok':True,'database':'connected','version':'9.3-economy'}
  except Exception:raise HTTPException(503,'База данных недоступна')
 @app.get('/api/config')
-def config():return {'jobs':JOBS,'businesses':BUSINESSES,'studies':STUDIES,'year_real_hours':36,'study_real_hours':12,'study_years':2,'stipend_amount':STIPEND_AMOUNT,'stipend_period_months':8,'promotions':[7,21,45],'withdrawals_enabled':False,'topups_enabled':False,'currency':'ЖН','economy_enabled':True}
+def config():return {'jobs':JOBS,'businesses':BUSINESSES,'studies':STUDIES,'year_real_hours':36,'study_real_hours':12,'study_years':2,'stipend_amount':STIPEND_AMOUNT,'stipend_period_months':8,'promotions':[7,21,45],'withdrawals_enabled':False,'topups_enabled':False,'currency':'ЖН','economy_enabled':True,'unlimited_employment':True}
 @app.post('/api/register')
 def register(body:Credentials):
  username=body.username.strip().lower();name=(body.name or body.username).strip()
@@ -379,11 +379,7 @@ def action(body:Action,aid:int=Depends(get_auth)):
    if ECONOMY:
     sec=__import__('economy').JOB_TO_SECTOR.get(v)
     if sec is None:raise HTTPException(400,'Для этой профессии пока нет работодателя')
-    try:ECONOMY.hire(s,c,d,sec)
-    except HTTPException as e:
-     if e.status_code!=409:raise
-     ECONOMY.queue(s,c,d,sec)
-     d['job']=None
+    ECONOMY.hire(s,c,d,sec)
    else:d['job']=v;d['employer']='state'
   elif t=='study':
    if v not in STUDIES:raise HTTPException(400,'Нет такой программы')

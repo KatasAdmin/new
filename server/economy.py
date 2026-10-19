@@ -44,7 +44,11 @@ TAX_RATE=.08
 WAGE_RATE=.40
 RETAIN_RATE=.20
 OWNER_RATE=.40
-TARGET_DAILY_WAGE=1.0  # prospective not guaranteed for all days; wages are paid from the fund
+# Unrestricted employment: work is available, but payout varies with the funded pool.
+# Spread the existing fund over days so a one-time treasury grant does not disappear at once.
+PAYROLL_DAILY_DIVISOR=7
+STATE_DAILY_GRANT=20000  # 2.00 ZHN in integer ledger units
+TARGET_DAILY_WAGE=1.0  # historical constant, not a guaranteed new payroll rate
 BASE_CAPACITY=40
 CAPACITY_PER_HIRE=30
 
@@ -170,16 +174,11 @@ class Economy:
    else:s.add(self.Holding(account_id=c.account_id,sector=key,shares=qty))
   # Earlier automatic state wages are not mirrored into the new system: no double payment.
   d['economy_v1']=True
-  # Preserve previously hired citizens by transferring them to a funded job
-  # where possible. Otherwise keep their profession in a dated waiting list.
+  # Preserve existing jobs when migrating, without restricting available places.
   old_job=d.get('job')
   dest=JOB_TO_SECTOR.get(old_job)
   if dest and not s.get(self.Worker,c.account_id) and self.age_at(d)>=18 and d.get('alive',True):
-   try:self.hire(s,c,d,dest)
-   except HTTPException as ex:
-    if ex.status_code!=409:raise
-    self.queue(s,c,d,dest)
-    d['job']=None
+   self.hire(s,c,d,dest)
   self.save(c,d)
 
  def claim(self,s,c,d):
@@ -277,6 +276,24 @@ class Economy:
   self.add_log(s,c.account_id,-amount(price),'Покупка бизнеса: '+info[1])
   self.save(c,d)
 
+ def sponsor_worker(self,s,owner,c,d,sector,worker_id):
+  if sector not in SECTOR_MAP:raise HTTPException(400,'Нет такого бизнеса')
+  if not s.query(self.Holding).filter_by(account_id=owner,sector=sector).first():
+   raise HTTPException(403,'Поддержать сотрудника может только владелец')
+  if worker_id==owner:raise HTTPException(400,'Нельзя оформлять инициативу найма на самого себя')
+  w=s.get(self.Worker,worker_id)
+  if not w or w.sector!=sector:raise HTTPException(404,'Сотрудник не найден в этой отрасли')
+  h=s.query(self.Hire).filter_by(worker_id=worker_id,sector=sector,active=1).first()
+  if not h:raise HTTPException(404,'Нет записи о работе сотрудника')
+  if h.initiator_id is not None:raise HTTPException(409,'За развитие этого сотрудника уже отвечает другой владелец')
+  # The owner invests an actual virtual token in the shared payroll pool.
+  n=units(1)
+  if units(d.get('balance',0))<n:raise HTTPException(400,'Для инициативы нужен 1 ЖН на зарплатный фонд')
+  d['balance']=amount(units(d.get('balance',0))-n);self.save(c,d)
+  s.get(self.Sector,sector).wage_pool+=n
+  h.initiator_id=owner
+  self.add_log(s,owner,-1,'Инициатива развития: '+SECTOR_MAP[sector][1])
+
  def finance_payroll(self,s,c,d,key,zhn):
   if key not in SECTOR_MAP:raise HTTPException(400,'Нет такого бизнеса')
   if not s.query(self.Holding).filter_by(account_id=c.account_id,sector=key).first():
@@ -290,20 +307,17 @@ class Economy:
   self.save(c,d)
 
  def job_slots(self,s,key):
-  sector=s.get(self.Sector,key)
+  # No numerical cap. This method is preserved for compatibility with old API consumers.
   active=s.query(self.Worker).filter_by(sector=key).count()
-  # Funds are reserved for at least seven days of the minimum promised target payout.
-  reserved=sector.wage_pool+sector.retained//2
-  capacity=max(0,min(200, reserved//units(7*TARGET_DAILY_WAGE)))
-  return int(capacity),int(active)
+  return None,int(active)
 
  def hire(self,s,c,d,key,initiator=None):
   if key not in SECTOR_MAP:raise HTTPException(400,'Нет такой профессии')
   if not d.get('alive',True) or self.age_at(d)<18:raise HTTPException(400,'Работа доступна живому персонажу с 18 лет')
-  slots,active=self.job_slots(s,key)
-  if active>=slots:raise HTTPException(409,'Свободных вакансий пока нет — можно встать в очередь')
   old=s.get(self.Worker,c.account_id)
   if old:
+   if old.sector==key:
+    raise HTTPException(409,'Ты уже работаешь по этой профессии')
    for h in s.query(self.Hire).filter_by(worker_id=c.account_id,active=1).all():h.active=0
    s.delete(old);s.flush()
   last=s.query(self.Hire).filter_by(sector=key,active=1).order_by(self.Hire.slot_end.desc()).first()
@@ -313,14 +327,13 @@ class Economy:
   s.add(self.Hire(worker_id=c.account_id,initiator_id=initiator,sector=key,slot_start=start,slot_end=start+CAPACITY_PER_HIRE))
   d['job']=SECTOR_MAP[key][3];d['employer']='sector'
   self.save(c,d)
+  # Clear obsolete waiting lists created before unlimited employment was introduced.
   for q in s.query(self.Queue).filter_by(account_id=c.account_id).all():s.delete(q)
   return w
 
  def queue(self,s,c,d,key):
-  if key not in SECTOR_MAP:raise HTTPException(400,'Нет такой профессии')
-  if self.age_at(d)<18 or not d.get('alive',True):raise HTTPException(400,'Заявка доступна с 18 лет')
-  q=s.query(self.Queue).filter_by(account_id=c.account_id,sector=key).one_or_none()
-  if q is None:s.add(self.Queue(account_id=c.account_id,sector=key,applied_day=today()))
+  # Compatibility for old versions: a queue application now becomes immediate employment.
+  return self.hire(s,c,d,key)
 
  def dismiss(self,s,owner,sector,worker_id):
   if sector not in SECTOR_MAP:raise HTTPException(400,'Нет такого бизнеса')
@@ -343,13 +356,13 @@ class Economy:
   d['job']=None;d['employer']='state';self.save(c,d)
 
  def fill_waitlist(self,s,key):
-  slots,active=self.job_slots(s,key)
+  # Convert legacy waiting lists to jobs; users already hired elsewhere keep that job.
   for q in s.query(self.Queue).filter_by(sector=key).order_by(self.Queue.applied_day,self.Queue.id).all():
-   if active>=slots:break
+   if s.get(self.Worker,q.account_id):
+    s.delete(q);continue
    c=self.get_char(s,q.account_id);d=json.loads(c.state)
    if self.age_at(d)<18 or not d.get('alive',True):s.delete(q);continue
-   self.hire(s,c,d,key,initiator=None)
-   active+=1
+   self.hire(s,c,d,key)
 
  def rollover(self,s):
   ctrl=self.locked(s)
@@ -357,25 +370,34 @@ class Economy:
   if ctrl.last_payroll>=target and ctrl.last_interest>=target:return
   # Cap missed days; no retroactive wage creation or promise from empty sector funds.
   if ctrl.last_payroll<target:
+   # A single daily rollover, even after a long absence, never invents back pay.
+   # State-operated industries receive bounded transfers from the existing treasury.
+   # Private employers receive only proceeds from customer purchases and deposits.
    for sec in s.query(self.Sector).order_by(self.Sector.key).all():
+    self.fill_waitlist(s,sec.key)
     workers=s.query(self.Worker).filter_by(sector=sec.key).order_by(self.Worker.account_id).all()
-    # Time-weighted payroll prevents gaining a whole daily wage after one minute.
-    eligible=[]
+    if not workers:continue
+    has_private_owner=s.query(self.Holding).filter_by(sector=sec.key).first() is not None
+    if not has_private_owner and ctrl.treasury>0:
+     subsidy=min(ctrl.treasury,STATE_DAILY_GRANT)
+     ctrl.treasury-=subsidy
+     sec.wage_pool+=subsidy
     period_start=(target-1)*86400
     period_end=target*86400
+    eligible=[]
     for w in workers:
-     time_fraction=max(0,min(1,(period_end-max(w.joined_at,period_start))/86400))
-     if time_fraction>0:eligible.append((w,units(TARGET_DAILY_WAGE*time_fraction)))
-    demand=sum(x for _,x in eligible)
-    payroll=min(sec.wage_pool,demand)
-    paid=0
-    if demand>0:
-     for w,need in eligible:
-      alloc=payroll*need//demand
-      if alloc:self.pending_credit(s,w.account_id,alloc);paid+=alloc
-     sec.wage_pool-=paid
-     sec.total_payroll+=paid
-    self.fill_waitlist(s,sec.key)
+     fraction=max(0,min(1,(period_end-max(w.joined_at,period_start))/86400))
+     if fraction>0:eligible.append((w,int(1_000_000*fraction)))
+    weight=sum(x for _,x in eligible)
+    # Only a proportion of the available cash is paid per day to smooth turnover.
+    budget=min(sec.wage_pool,max(1,sec.wage_pool//PAYROLL_DAILY_DIVISOR))
+    allocated=0
+    if weight and budget:
+     for w,weighted in eligible:
+      pay=budget*weighted//weight
+      if pay:self.pending_credit(s,w.account_id,pay);allocated+=pay
+     sec.wage_pool-=allocated
+     sec.total_payroll+=allocated
    ctrl.last_payroll=target
   if ctrl.last_interest<target:
    loans=s.query(self.Loan).all()
@@ -473,11 +495,13 @@ class Economy:
    shares=sum(h.shares for h in sector_holdings)
    owners_count=sum(1 for h in sector_holdings if h.shares>0)
    own=sum(h.shares for h in holders if h.sector==key)
-   vacancies,staff=self.job_slots(s,key)
+   _,staff=self.job_slots(s,key)
    pending=sec.wage_pool if sec else 0
+   pending+=min(ctrl.treasury,STATE_DAILY_GRANT) if not shares else 0
+   day_budget=min(pending,max(1,pending//PAYROLL_DAILY_DIVISOR)) if pending else 0
    sectors.append({'key':key,'name':name,'price':price,'job':job,'product':product,'owners':shares,'owners_count':owners_count,'my_shares':own,
-    'my_percent':round(100*own/shares,2) if shares else 0,'available_jobs':max(0,vacancies-staff),
-    'workers':staff,'estimated_wage':round(min(TARGET_DAILY_WAGE,amount(pending)/max(1,staff+1)),2),
+    'my_percent':round(100*own/shares,2) if shares else 0,'available_jobs':None,
+    'workers':staff,'estimated_wage':amount(day_budget//max(1,staff+1)),
     'sales_total':amount(sec.total_revenue),'profit_total':amount(sec.total_profit),'wage_fund':amount(sec.wage_pool),
     'reserve':amount(sec.retained)})
   return {'currency':'ЖН','treasury':amount(ctrl.treasury),'minted':amount(ctrl.minted),'burned':amount(ctrl.burned),
@@ -517,27 +541,14 @@ class Economy:
     elif typ=='share':svc.buy_share(s,c,d,body.sector or '')
     elif typ=='queue':svc.queue(s,c,d,body.sector or '')
     elif typ=='apply':
-     key=body.sector or ''
-     try:svc.hire(s,c,d,key)
-     except HTTPException as ex:
-      if ex.status_code!=409:raise
-      svc.queue(s,c,d,key)
+     svc.hire(s,c,d,body.sector or '')
     elif typ=='leave':svc.leave_job(s,c,d)
     elif typ=='cancel_queue':
      for q in s.query(svc.Queue).filter_by(account_id=aid,sector=body.sector).all():s.delete(q)
     elif typ=='fire':svc.dismiss(s,aid,body.sector or '',body.target_id or 0)
     elif typ=='hire':
-     if body.sector not in SECTOR_MAP:raise HTTPException(400,'Нет такого бизнеса')
-     own=s.query(svc.Holding).filter_by(account_id=aid,sector=body.sector).one_or_none()
-     if not own:raise HTTPException(403,'Нанимать может только совладелец отрасли')
-     if not body.target_id or body.target_id==aid:raise HTTPException(400,'Укажи ID кандидата из очереди')
-     q=s.query(svc.Queue).filter_by(account_id=body.target_id,sector=body.sector).first()
-     if not q:raise HTTPException(404,'Кандидата нет в очереди')
-     first=s.query(svc.Queue).filter_by(sector=body.sector).order_by(svc.Queue.applied_day,svc.Queue.id).first()
-     if first and first.id!=q.id:raise HTTPException(409,'Сначала кандидат, который раньше встал в очередь')
-     target=svc.get_char(s,body.target_id);td=json.loads(target.state)
-     svc.hire(s,target,td,body.sector,initiator=aid)
-     s.delete(q)
+     if not body.target_id:raise HTTPException(400,'Нужен ID уже работающего сотрудника')
+     svc.sponsor_worker(s,aid,c,d,body.sector or '',body.target_id)
     elif typ=='finance':svc.finance_payroll(s,c,d,body.sector or '',body.amount)
     elif typ=='deposit':svc.deposit(s,c,d,body.amount)
     elif typ=='undeposit':svc.withdraw_deposit(s,c,d,body.amount)
